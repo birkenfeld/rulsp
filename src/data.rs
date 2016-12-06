@@ -4,13 +4,27 @@ use std::result;
 use eval::eval;
 use env::{c_env, env_bind, env_set, Env};
 
+pub struct AtomFn(fn(&[AtomVal]) -> AtomRet);
+
+impl Debug for AtomFn {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "<fn>")
+    }
+}
+
+impl PartialEq for AtomFn {
+    fn eq(&self, _other: &AtomFn) -> bool {
+        false  // TODO
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum AtomType {
     Nil,
     Int(i64),
-    Symbol(String),
+    Symbol(Rc<String>),
     List(Vec<AtomVal>),
-    Func(fn(Vec<AtomVal>) -> AtomRet),
+    Func(AtomFn),
     AFunc(AFuncData), // user defined function
 }
 
@@ -84,27 +98,23 @@ impl AtomType {
     }
 
 
-    pub fn apply(&self, args: Vec<AtomVal>) -> AtomRet {
+    pub fn apply(&self, args: &[AtomVal]) -> AtomRet {
         match *self {
-            AtomType::Func(f) => f(args),
+            AtomType::Func(ref f) => f.0(args),
             AtomType::AFunc(ref fd) => {
-                let fd = fd.clone();
                 let func_env = c_env(Some(fd.env.clone()));
                 match *fd.params {
                     AtomType::List(ref params) => {
-                        let ampersand = c_symbol("&".to_string());
-                        // println!("params={:?} args={:?}", params, args);
-                        env_bind(&func_env, params, &args)?;
+                        env_bind(&func_env, params, args);
 
-                        let args_count = params.clone().iter().take_while(|v| **v != ampersand).count();
-                        let rest = args.into_iter().skip(args_count).collect::<Vec<AtomVal>>();
-
-                        if args_count != params.iter().count() && params.get(args_count + 1).is_some() {
-                            if rest.len() > 0 {
-                                env_set(&func_env, params.get(args_count + 1).unwrap(), c_list(rest))?;
-                            } else {
-                                env_set(&func_env, params.get(args_count + 1).unwrap(), c_nil())?;
-
+                        if let Some(args_count) = params.iter().position(|v| v.is_symbol("&")) {
+                            if let Some(restpar) = params.get(args_count + 1) {
+                                let rest = args.iter().skip(args_count).cloned().collect::<Vec<_>>();
+                                if !rest.is_empty() {
+                                    env_set(&func_env, restpar, c_list(rest));
+                                } else {
+                                    env_set(&func_env, restpar, c_nil());
+                                }
                             }
                         }
 
@@ -113,32 +123,43 @@ impl AtomType {
                 }
 
                 trace!("action=AtomType#apply env={:?}", func_env);
-                eval(fd.exp, func_env)
+                eval(&fd.exp, &func_env)
             },
             _ => Err(AtomError::InvalidType("function".to_string(), self.format(true)))
         }
     }
 
+    #[inline]
     pub fn get_int(&self) -> result::Result<i64, AtomError> {
-        match self {
-            &AtomType::Int(i) => Ok(i),
-            ref v => Err(AtomError::InvalidType("Int".to_string(), v.format(true))),
+        match *self {
+            AtomType::Int(i) => Ok(i),
+            _ => Err(AtomError::InvalidType("Int".to_string(), self.format(true))),
         }
     }
 
-    pub fn get_list<'a>(&'a self) -> result::Result<&'a Vec<AtomVal>, AtomError>{
+    #[inline]
+    pub fn get_list(&self) -> result::Result<&Vec<AtomVal>, AtomError>{
         trace!("action=AtomType#get_list self={}", self.format(true));
-        match self {
-            &AtomType::List(ref list) => Ok(list),
-            ref v => Err(AtomError::InvalidType("List".to_string(), v.format(true))),
+        match *self {
+            AtomType::List(ref list) => Ok(list),
+            _ => Err(AtomError::InvalidType("List".to_string(), self.format(true))),
         }
 
     }
 
-    pub fn get_symbol<'a>(&'a self) -> result::Result<&'a str, AtomError> {
-        match self {
-            &AtomType::Symbol(ref s) => Ok(s),
-            ref v => Err(AtomError::InvalidType("Symbol".to_string(), v.format(true))),
+    #[inline]
+    pub fn get_symbol(&self) -> result::Result<&str, AtomError> {
+        match *self {
+            AtomType::Symbol(ref s) => Ok(s),
+            _ => Err(AtomError::InvalidType("Symbol".to_string(), self.format(true))),
+        }
+    }
+
+    #[inline]
+    pub fn is_symbol(&self, sym: &str) -> bool {
+        match *self {
+            AtomType::Symbol(ref s) => **s == sym,
+            _ => false
         }
     }
 }
@@ -176,24 +197,29 @@ impl Display for AtomError {
 pub type AtomVal = Rc<AtomType>;
 pub type AtomRet = result::Result<AtomVal, AtomError>;
 
+
+thread_local! {
+    static NIL: AtomVal = Rc::new(AtomType::Nil);
+}
+
 pub fn c_nil() -> AtomVal {
-    Rc::new(AtomType::Nil)
+    NIL.with(|nil| nil.clone())
 }
 
 pub fn c_int(num: i64) -> AtomVal {
     Rc::new(AtomType::Int(num))
 }
 
-pub fn c_symbol(symbol: String) -> AtomVal {
-    Rc::new(AtomType::Symbol(symbol))
+pub fn c_symbol(symbol: &str) -> AtomVal {
+    Rc::new(AtomType::Symbol(Rc::new(symbol.to_string())))
 }
 
 pub fn c_list(seq: Vec<AtomVal>) -> AtomVal {
     Rc::new(AtomType::List(seq))
 }
 
-pub fn c_func(f: fn(Vec<AtomVal>) -> AtomRet) -> AtomVal {
-    Rc::new(AtomType::Func(f))
+pub fn c_func(f: fn(&[AtomVal]) -> AtomRet) -> AtomVal {
+    Rc::new(AtomType::Func(AtomFn(f)))
 }
 
 
@@ -202,7 +228,7 @@ pub fn c_afunc(env: Env, params: AtomVal, exp: AtomVal) -> AtomVal {
 }
 
 pub fn c_macro(fd: &AFuncData) -> AtomVal {
-    let mut fd = (*fd).clone();
+    let mut fd = fd.clone();
     fd.is_macro = true;
 
     Rc::new(AtomType::AFunc(fd))
@@ -228,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_symbol() {
-        assert_eq!(format!("{}", c_symbol(String::from("test"))), "test");
+        assert_eq!(format!("{}", c_symbol("test")), "test");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::data::{AtomVal, AtomType, AtomRet, c_nil};
+use super::data::{AtomVal, AtomType, c_nil};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt;
@@ -7,7 +7,7 @@ use fnv::FnvHashMap;
 #[derive(PartialEq)]
 pub struct EnvType {
     parent: Option<Env>,
-    data: FnvHashMap<String, AtomVal>,
+    data: FnvHashMap<Rc<String>, AtomVal>,
 }
 
 pub type Env = Rc<RefCell<EnvType>>;
@@ -49,48 +49,44 @@ pub fn c_env(env: Option<Env>) -> Env {
     }))
 }
 
-fn env_find(env: &Env, key: &AtomVal) -> Option<(Env, AtomVal)> {
-    match **key {
-        AtomType::Symbol(ref str) => {
-            let env_borrow = env.borrow();
-            match env_borrow.data.get(str) {
-                Some(value) => Some((env.clone(), value.clone())),
-                None => {
-                    if let Some(ref parent) = env_borrow.parent {
-                        env_find(parent, key)
-                    } else {
-                        None
-                    }
-                }
+fn env_find_inner(env: &Env, key: &Rc<String>) -> Option<(Env, AtomVal)> {
+    let env_borrow = env.borrow();
+    match env_borrow.data.get(key) {
+        Some(value) => Some((env.clone(), value.clone())),
+        None => {
+            if let Some(ref parent) = env_borrow.parent {
+                env_find_inner(parent, key)
+            } else {
+                None
             }
         }
+    }
+}
+
+fn env_find(env: &Env, key: &AtomVal) -> Option<(Env, AtomVal)> {
+    match **key {
+        AtomType::Symbol(ref str) => env_find_inner(env, str),
         _ => None,
     }
 }
 
-pub fn env_set(env: &Env, key: &AtomVal, value: AtomVal) -> AtomRet {
+pub fn env_set(env: &Env, key: &AtomVal, value: AtomVal) {
     match **key {
         AtomType::Symbol(ref str) => {
-            env.borrow_mut().data.insert(str.to_string(), value);
-            Ok(c_nil())
+            env.borrow_mut().data.insert(str.clone(), value);
         }
         _ => unreachable!(),
     }
-
 }
 
 pub fn env_get(env: &Env, key: &AtomVal) -> Option<AtomVal> {
-    match env_find(env, key) {
-        None => None,
-        Some((_, value)) => Some(value),
-    }
+    env_find(env, key).map(|(_, value)| value)
 }
 
-pub fn env_bind(env: &Env, params: &Vec<AtomVal>, args: &Vec<AtomVal>) -> AtomRet {
+pub fn env_bind(env: &Env, params: &[AtomVal], args: &[AtomVal]) {
     for (index, param) in params.iter().enumerate() {
-        env_set(env, param, args.get(index).unwrap_or(&c_nil()).clone())?;
+        env_set(env, param, args.get(index).cloned().unwrap_or_else(c_nil));
     }
-    Ok(c_nil())
 }
 
 #[allow(unused_must_use)]
@@ -109,8 +105,8 @@ mod tests {
     #[test]
     fn test_set() {
         let env = c_env(None);
-        env_set(&env, &c_symbol(String::from("Test")), c_int(10));
-        env_set(&env, &c_symbol(String::from("Gra")), c_int(5));
+        env_set(&env, &c_symbol("Test"), c_int(10));
+        env_set(&env, &c_symbol("Gra"), c_int(5));
 
         assert_eq!(format!("{}", *env.borrow()), "{Gra 5 Test 10}");
     }
@@ -118,18 +114,18 @@ mod tests {
     #[test]
     fn test_get() {
         let env = c_env(None);
-        let key = c_symbol(String::from("Test"));
-        env_set(&env, &key.clone(), c_int(10));
+        let key = c_symbol("Test");
+        env_set(&env, &key, c_int(10));
 
         let child = c_env(Some(env));
-        env_set(&child, &c_symbol(String::from("TestChild")), c_int(20));
+        env_set(&child, &c_symbol("TestChild"), c_int(20));
 
 
         let grandchild = c_env(Some(child));
 
         assert_eq!(format!("{}", env_get(&grandchild, &key).unwrap()), "10");
         assert_eq!(format!("{}",
-                           env_get(&grandchild, &c_symbol(String::from("TestChild"))).unwrap()),
+                           env_get(&grandchild, &c_symbol("TestChild")).unwrap()),
                    "20");
     }
 
@@ -137,6 +133,6 @@ mod tests {
     fn test_get_missing_value() {
         let env = c_env(None);
 
-        assert!(env_get(&env, &c_symbol(String::from("Missing"))).is_none());
+        assert!(env_get(&env, &c_symbol("Missing")).is_none());
     }
 }
